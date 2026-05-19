@@ -10,17 +10,16 @@ Triton is a language for writing efficient CUDA kernels in Python without dealin
 
 ## Contents
 
-- `add.py` - Vector addition kernel (starter example)
-- `benchmarking.py` - Performance measurement utilities
+- `vector-add.py` - Vector addition kernel (starter example)
 
 ## Quick Start
 
 ```bash
 # Install Triton
-pip install triton
+pip install triton numpy pandas matplotlib torch
 
 # Run vector addition example
-python3 add.py
+python3 vector-add.py
 ```
 
 ## Resources
