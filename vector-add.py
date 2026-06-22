@@ -63,7 +63,7 @@ def test_add_kernel(size):
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['size'], # argument names to use as an x-axis for the plot
-        x_vals=[2**i for i in range(12, 28, 1)], # different values of x_names to benchmark
+        x_vals=[2**i for i in range(4, 28, 1)], # different values of x_names to benchmark
         x_log = True, # makes x-axis logarithmic
         line_arg='provider', # title of the legend 
         line_vals=['triton', 'torch'], # designators of the different entries in the legend

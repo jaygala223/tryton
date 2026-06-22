@@ -6,19 +6,20 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 @triton.jit
-def softmax_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+def softmax_kernel(x_ptr, output_ptr, n_cols, BLOCK_SIZE: tl.constexpr):
 
     pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
+    row_start = pid * n_cols
+    # block_start = pid * BLOCK_SIZE
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_cols
 
-    x = tl.load(x_ptr + offsets, mask=mask)
+    x = tl.load(x_ptr + row_start + offsets, mask=mask)
+    x = x - tl.max(x)
+    numerator = tl.exp(x)
+    output = numerator / tl.sum(numerator)
 
-    output = tl.exp(x)
-    output = output / tl.sum(output)
-
-    tl.store(output_ptr + offsets, output, mask=mask)
+    tl.store(output_ptr + row_start + offsets, output, mask=mask)
 
 
 def softmax(x: torch.Tensor):
@@ -27,90 +28,74 @@ def softmax(x: torch.Tensor):
 
     assert x.is_cuda and output.is_cuda, "All tensors must be on CUDA"
 
+    n_rows, n_cols = x.shape
+
     n_elements = output.numel()
 
-    BLOCK_SIZE = 1024
+    BLOCK_SIZE = triton.next_power_of_2(n_cols) # We will process one row per block, so block size is number of columns
 
-    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+    # grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
 
-    softmax_kernel[grid](x, output, n_elements, BLOCK_SIZE=BLOCK_SIZE)
+    grid = (n_rows,)  # We launch one block per row, so grid size is number of rows
+
+    softmax_kernel[grid](x, output, n_cols, BLOCK_SIZE=BLOCK_SIZE)
 
     return output
 
 
-# regular softmax implementation
-def regular_softmax(x: torch.Tensor, dim: int = -1) -> torch.Tensor:
+def test_softmax_kernel(size: tuple, atol=1e-3, rtol=1e-3, device=DEVICE):
+    """
+    Here is where we test the wrapper function and kernel that we wrote 
+    above to ensure all our values are correct, using pytorch as the 
+    correct answer to compare against
 
-    numerator = torch.exp(x)
-    denominator = torch.sum(numerator, dim=dim, keepdim=True)
+    we'll use an irregular number of rows & cols to verify that our padding mechanism works
+    """
+    torch.manual_seed(0)
+    assert type(size) is tuple and len(size) == 2
+    x = torch.randn(size[0], size[1], device=DEVICE)
 
-    return numerator / denominator
+    z_tri = softmax(x)
+    z_ref = torch.softmax(x, axis=1)
+    torch.testing.assert_close(z_tri, z_ref, atol=atol, rtol=rtol)
+    print("PASSED")
+
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
-        x_names=['size'],  # Argument names to use as an x-axis for the plot.
-        x_vals=[2**i for i in range(12, 28, 1)],  # Different possible values for `x_name`.
-        x_log=True,  # x axis is logarithmic.
-        line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
-        line_vals=['triton', 'torch'],  # Possible values for `line_arg`.
-        line_names=['Triton', 'Torch'],  # Label name for the lines.
-        styles=[('blue', '-'), ('green', '-')],  # Line styles.
-        ylabel='GB/s',  # Label name for the y-axis.
-        plot_name='softmax-performance',  # Name for the plot. Used also as a file name for saving the plot.
-        args={},  # Values for function arguments not in `x_names` and `y_name`.
+        x_names=['N'],
+        x_vals=[128 * i for i in range(2, 100)],
+        line_arg='provider',
+        line_vals=['triton', 'torch'],
+        line_names=["Triton", "Torch"],
+        styles=[('blue', '-'), ('green', '-')],
+        ylabel="GB/s",
+        plot_name="triton-softmax-performance",
+        args={'M': 4096} # values for function arguments not in x_names
     ))
+def benchmark(M, N, provider):
+    # making the input data
+    x = torch.randn(M, N, device=DEVICE, dtype=torch.float32)
 
+    # these two lines ensure more accurate benchmarks; i usually forget to use them but it's not a big deal
+    stream = getattr(torch, DEVICE.type).Stream()
+    getattr(torch, DEVICE.type).set_stream(stream)
 
-def benchmark(size, provider, kernel_1=None, kernel_2=None):
-    x = torch.rand(size, device=DEVICE, dtype=torch.float32)
-    y = torch.rand(size, device=DEVICE, dtype=torch.float32)
-    quantiles = [0.5, 0.2, 0.8]
-    if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: kernel_1(x), quantiles=quantiles)
     if provider == 'torch':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: kernel_2(x), quantiles=quantiles)
+        ms = triton.testing.do_bench(lambda: torch.softmax(x, axis=-1))
+    if provider == 'triton':
+        ms = triton.testing.do_bench(lambda: softmax(x))
     gbps = lambda ms: 2 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
-    return gbps(ms), gbps(max_ms), gbps(min_ms)
+        # 2 = number of memory operations (1 read + 1 write)
+        # x.numel() = number of elements
+        # x.element_size() = bytes per element (4 for float32)
+        # 1e-9 converts bytes to GB
+        # 1e-3 converts milliseconds to seconds
+    return gbps(ms)
 
 
 if __name__ == "__main__":
 
-    answer = regular_softmax(torch.tensor([2.0, 1.0, 0.1]))
-    print(answer)  # tensor([0.6590, 0.2424, 0.0986])
+    test_softmax_kernel(size=(10215, 1021))
 
-    benchmark.run(kernel_1=softmax, kernel_2=regular_softmax, print_data=True, save_path="./", show_plots=True)
-
-    print("\n\nTesting Wall Clock Time Now...\n\n")
-
-    for size in [2**i for i in range(12, 20, 1)]:
-        x = torch.rand(size, device=DEVICE, dtype=torch.float32)
-
-        # Warmup
-        for _ in range(10):
-            softmax(x)
-            regular_softmax(x)
-
-        # Timing Triton Softmax
-        torch.cuda.synchronize()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
-        start.record()
-        for _ in range(100):
-            softmax(x)
-        end.record()
-
-        torch.cuda.synchronize()
-        triton_time = start.elapsed_time(end) / 100  # in milliseconds
-
-        # Timing Torch Softmax
-        torch.cuda.synchronize()
-        start.record()
-        for _ in range(100):
-            regular_softmax(x)
-        end.record()
-
-        torch.cuda.synchronize()
-        torch_time = start.elapsed_time(end) / 100  # in milliseconds
-
-        print(f"Size: {size:>10}, Triton Time: {triton_time:.4f} ms, Torch Time: {torch_time:.4f} ms")
+    benchmark.run(save_path='.', print_data=True)
