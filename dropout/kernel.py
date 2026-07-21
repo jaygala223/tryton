@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 import triton
 import triton.language as tl
@@ -73,4 +75,4 @@ if __name__ == "__main__":
     # benchmark
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--benchmark":
-        benchmark.run(save_path='.', print_data=True)
+        benchmark.run(save_path=str(Path(__file__).parent / 'results'), print_data=True)

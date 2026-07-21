@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 import triton
 import triton.language as tl
@@ -98,4 +100,4 @@ if __name__ == "__main__":
 
     test_softmax_kernel(size=(10215, 1021))
 
-    benchmark.run(save_path='.', print_data=True)
+    benchmark.run(save_path=str(Path(__file__).parent / 'results'), print_data=True)
