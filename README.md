@@ -18,6 +18,7 @@ benchmark CSV files and plots remain in that kernel's `results/` subdirectory.
 - `fused_softmax/` - fused softmax tutorial implementation.
 - `dropout/` - seeded dropout.
 - `matmul/` - block-wise matrix multiplication.
+- `layernorm/` - fused layer norm with a custom backward pass (autograd integration).
 
 ## Quick Start
 
